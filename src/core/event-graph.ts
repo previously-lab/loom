@@ -22,14 +22,21 @@ export function validateEventGraph(events: StoryEvent[]): void {
 }
 
 /** Group events into sessions: consecutive events within `gapDays` of each
- *  other share one session. Returns groups in chronological order. */
-export function groupEventsIntoSessions(events: StoryEvent[], gapDays = 14): StoryEvent[][] {
+ *  other share one session, and a session never holds more than
+ *  `maxEventsPerSession` events (pacing control). Chronological order. */
+export function groupEventsIntoSessions(
+  events: StoryEvent[],
+  gapDays = 14,
+  maxEventsPerSession = 3,
+): StoryEvent[][] {
   const sorted = [...events].sort((a, b) => a.dayOffset - b.dayOffset);
   const sessions: StoryEvent[][] = [];
   let current: StoryEvent[] = [];
   let lastOffset = -Infinity;
   for (const e of sorted) {
-    if (current.length > 0 && e.dayOffset - lastOffset > gapDays) {
+    const tooSparse = current.length > 0 && e.dayOffset - lastOffset > gapDays;
+    const tooFull = current.length >= maxEventsPerSession;
+    if (tooSparse || tooFull) {
       sessions.push(current);
       current = [];
     }

@@ -11,8 +11,17 @@ import {
   sliceId,
   turnTimestamps,
 } from "./core/calendar.js";
-import { analyzeSlice, estimateCost, generateSliceContent } from "./core/generate.js";
+import { lintTranscript } from "./core/consistency.js";
+import {
+  analyzeSlice,
+  estimateCost,
+  generateSliceContent,
+  summarizeSession,
+  type Usage,
+} from "./core/generate.js";
+import { generateQa, validateQa, type QaItem } from "./core/qa.js";
 import { writeSlice } from "./writers/previously.js";
+import { collectDiaIds, toLocomoSample, writeLocomo } from "./writers/locomo.js";
 
 function arg(name: string, fallback?: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -20,13 +29,23 @@ function arg(name: string, fallback?: string): string {
   if (fallback !== undefined) return fallback;
   throw new Error(`Missing --${name}`);
 }
+const has = (name: string) => process.argv.includes(`--${name}`);
 
 async function main() {
   const storyDir = arg("story");
   const outDir = arg("out", "out");
-  const sessionIndex = Number(arg("slice", "0"));
   const seed = Number(arg("seed", "42"));
   const turnCount = Number(arg("turns", "10"));
+  const gapDays = Number(arg("gap-days", "14"));
+  const maxEvents = Number(arg("max-events", "3"));
+  const qaCount = Number(arg("qa", "0"));
+  const maxCost = Number(arg("max-cost", "0.10"));
+  const format = arg("format", "both"); // previously | locomo | both
+  const runAll = has("all");
+  const singleIndex = has("slice") ? Number(arg("slice")) : null;
+  if (!runAll && singleIndex === null) {
+    throw new Error("Pass --all to generate every session, or --slice N for a single one");
+  }
 
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) throw new Error("DEEPSEEK_API_KEY is not set");
@@ -37,59 +56,110 @@ async function main() {
   validateEventGraph(bible.events);
   const tz = bible.timezone;
   const dated = assignEventDates(bible.events, bible.startDate, tz);
-  const sessions = groupEventsIntoSessions(bible.events);
-  if (sessionIndex >= sessions.length) {
-    throw new Error(`Only ${sessions.length} session(s) available, asked for #${sessionIndex}`);
+  const sessions = groupEventsIntoSessions(bible.events, gapDays, maxEvents);
+
+  const indices = runAll ? sessions.map((_, i) => i) : [singleIndex!];
+  if (singleIndex !== null && singleIndex >= sessions.length) {
+    throw new Error(`Only ${sessions.length} session(s), asked for #${singleIndex}`);
   }
-  const sessionEvents = sessions[sessionIndex];
-  const datedSessionEvents = sessionEvents.map(
-    (e) => dated.find((d) => d.id === e.id)!,
-  );
+  if (singleIndex !== null && singleIndex > 0) {
+    console.log("[warn] single-slice mode: no prior-session summary, continuity is standalone");
+  }
 
   const rng = mulberry32(seed);
-  const start = scheduleSession(datedSessionEvents, rng, tz);
-  console.log(
-    `[plan] session #${sessionIndex}: ${sessionEvents.map((e) => e.id).join(", ")} at ${start.toISOString()}`,
-  );
-
-  const gen = await generateSliceContent(
-    apiKey,
-    bible.persona,
-    tz,
-    start,
-    datedSessionEvents,
-    dated,
-    turnCount,
-  );
-  console.log(
-    `[gen]  in=${gen.usage.promptTokens} (hit=${gen.usage.cacheHitTokens}) out=${gen.usage.completionTokens} ~$${estimateCost(gen.usage).toFixed(6)}`,
-  );
-
-  const ana = await analyzeSlice(apiKey, bible.persona, tz, start, gen.slice);
-  console.log(
-    `[mark] in=${ana.usage.promptTokens} (hit=${ana.usage.cacheHitTokens}) out=${ana.usage.completionTokens} ~$${estimateCost(ana.usage).toFixed(6)}`,
-  );
-
-  const at = turnTimestamps(start, gen.slice.turns.length, rng);
-  const slice: Slice = {
-    sliceId: sliceId(start, tz),
-    start,
-    end: at[at.length - 1],
-    timezone: bible.timezone,
-    events: datedSessionEvents,
-    turns: attachTimestamps(gen.slice.turns, at),
-    marking: ana.marking,
+  const slices: Slice[] = [];
+  const summaries: string[] = [];
+  let rollingSummary: string | undefined;
+  let spent = 0;
+  const track = (u: Usage, label: string) => {
+    const c = estimateCost(u);
+    spent += c;
+    console.log(
+      `[${label}] in=${u.promptTokens} (hit=${u.cacheHitTokens}) out=${u.completionTokens} ~$${c.toFixed(6)} | total ~$${spent.toFixed(6)}`,
+    );
+    if (spent > maxCost) {
+      throw new Error(`Budget exceeded: ~$${spent.toFixed(4)} > --max-cost $${maxCost}`);
+    }
   };
 
-  const file = await writeSlice(outDir, slice);
-  const total = estimateCost({
-    promptTokens: gen.usage.promptTokens + ana.usage.promptTokens,
-    completionTokens: gen.usage.completionTokens + ana.usage.completionTokens,
-    cacheHitTokens: gen.usage.cacheHitTokens + ana.usage.cacheHitTokens,
-    cacheMissTokens: gen.usage.cacheMissTokens + ana.usage.cacheMissTokens,
-  });
-  console.log(`[done] wrote ${file}`);
-  console.log(`[cost] total ~$${total.toFixed(6)} (off-peak estimate)`);
+  for (const idx of indices) {
+    const sessionEvents = sessions[idx].map((e) => dated.find((d) => d.id === e.id)!);
+    const start = scheduleSession(sessionEvents, rng, tz);
+    console.log(
+      `[plan] session #${idx}: ${sessionEvents.map((e) => e.id).join(", ")} at ${start.toISOString()}`,
+    );
+
+    const gen = await generateSliceContent(
+      apiKey, bible.persona, tz, start, sessionEvents, dated, turnCount, rollingSummary,
+    );
+    track(gen.usage, "gen");
+
+    const ana = await analyzeSlice(apiKey, bible.persona, tz, start, gen.slice);
+    track(ana.usage, "mark");
+
+    const sum = await summarizeSession(
+      apiKey, bible.persona, tz, start, gen.slice, rollingSummary,
+    );
+    track(sum.usage, "sum");
+    rollingSummary = sum.summary;
+    summaries.push(sum.summary);
+
+    // Code-side temporal lint — cheap, catches what models get wrong.
+    const spanStart = dated[0].date;
+    const spanEnd = new Date(Math.max(...dated.map((e) => e.date.getTime())) + 400 * 86_400_000);
+    for (const w of lintTranscript(gen.slice.turns, spanStart, spanEnd)) {
+      console.log(`[lint] session #${idx} turn ${w.turn}: ${w.message}`);
+    }
+
+    const at = turnTimestamps(start, gen.slice.turns.length, rng);
+    const slice: Slice = {
+      sliceId: sliceId(start, tz),
+      start,
+      end: at[at.length - 1],
+      timezone: tz,
+      events: sessionEvents,
+      turns: attachTimestamps(gen.slice.turns, at),
+      marking: ana.marking,
+    };
+    slices.push(slice);
+
+    if (format === "previously" || format === "both") {
+      const file = await writeSlice(outDir, slice);
+      console.log(`[write] previously: ${file}`);
+    }
+  }
+
+  if (format === "locomo" || format === "both") {
+    let qa: QaItem[] = [];
+    const sample = toLocomoSample(
+      `${bible.persona.name.toLowerCase().replace(/\s+/g, "-")}-v1`,
+      bible.persona,
+      "Assistant",
+      slices,
+      summaries,
+      qa,
+    );
+    if (qaCount > 0) {
+      const turns = slices.flatMap((s, i) =>
+        s.turns.map((t, j) => ({
+          diaId: `D${i + 1}:${j + 1}`,
+          speaker: t.role === "user" ? bible.persona.name : "Assistant",
+          text: t.text,
+        })),
+      );
+      const gen = await generateQa(apiKey, bible.persona, turns, qaCount);
+      track(gen.usage, "qa");
+      qa = gen.qa;
+      sample.qa = qa;
+      const errors = validateQa(qa, collectDiaIds(sample));
+      for (const e of errors) console.log(`[qa-lint] ${e}`);
+      if (errors.length > 0) console.log(`[qa-lint] ${errors.length} problem(s) — review before publishing`);
+    }
+    const file = await writeLocomo(outDir, sample);
+    console.log(`[write] locomo: ${file}`);
+  }
+
+  console.log(`[done] ${slices.length} session(s), total ~$${spent.toFixed(6)} (off-peak estimate)`);
 }
 
 main().catch((err) => {
