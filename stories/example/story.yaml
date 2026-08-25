@@ -1,0 +1,37 @@
+persona:
+  name: Maya Chen
+  summary: >-
+    Maya Chen is a 29-year-old indie developer living in Hangzhou. She quit her
+    job at a fintech company last year to build Tidepool, a habit-tracking app
+    she hopes to launch publicly this summer. She is also training for her first
+    marathon. She lives with her cat, Miso, and calls her mother in Vancouver
+    every Sunday.
+startDate: "2025-03-01"
+timezone: Asia/Shanghai
+events:
+  - id: quit-job
+    dayOffset: 0
+    title: Maya gives notice at her fintech job
+    detail: >-
+      After months of deliberation Maya finally resigns to work on Tidepool
+      full-time. She feels equal parts terrified and relieved.
+  - id: first-beta
+    dayOffset: 10
+    title: Tidepool closed beta goes live
+    detail: >-
+      Maya ships the closed beta to 40 testers. Onboarding completion is only
+      55%, much lower than she hoped, and she suspects the tutorial is confusing.
+    causedBy: [quit-job]
+  - id: marathon-signup
+    dayOffset: 12
+    title: Maya registers for the Hangzhou Marathon
+    detail: >-
+      She commits to the November race with a target of finishing under 4
+      hours 30 minutes, and starts doing easy base runs a few times a week.
+  - id: beta-feedback
+    dayOffset: 20
+    title: Beta testers report onboarding drop-off
+    detail: >-
+      Three testers independently tell Maya they quit during the tutorial.
+      She decides to rewrite the onboarding flow as a single progressive screen.
+    causedBy: [first-beta]
