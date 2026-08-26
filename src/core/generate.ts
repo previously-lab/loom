@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { z } from "zod";
 import type {
   DatedEvent,
@@ -49,6 +50,7 @@ export async function chat(apiKey: string, messages: ChatMessage[]): Promise<Cha
         body: JSON.stringify({
           model: MODEL,
           messages,
+          max_tokens: 8192,
           thinking: { type: "disabled" },
           response_format: { type: "json_object" },
         }),
@@ -87,6 +89,132 @@ export async function chat(apiKey: string, messages: ChatMessage[]): Promise<Cha
   throw lastErr;
 }
 
+/** Best-effort JSON extraction: handles trailing text, markdown fences, and
+ *  truncated objects by taking the outermost JSON object/array. */
+function extractJson(content: string): string {
+  content = content.trim();
+  // Strip markdown code fences if present.
+  if (content.startsWith("```")) {
+    content = content.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "").trim();
+  }
+  // Find outermost object or array.
+  const objectStart = content.indexOf("{");
+  const arrayStart = content.indexOf("[");
+  let start = -1;
+  if (objectStart === -1) start = arrayStart;
+  else if (arrayStart === -1) start = objectStart;
+  else start = Math.min(objectStart, arrayStart);
+  if (start === -1) return content;
+  let end = -1;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < content.length; i++) {
+    const ch = content[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  if (end === -1) return content;
+  return content.slice(start, end);
+}
+
+/** Removes trailing commas before closing brackets — the most common model JSON
+ *  syntax mistake. */
+function removeTrailingCommas(content: string): string {
+  return content.replace(/,\s*([}\]])/g, "$1");
+}
+
+/** Heal truncated JSON by closing open strings and brackets.
+ *  Uses a stack so already-closed containers are not double-closed. */
+function completeJson(content: string): string {
+  content = content.trimEnd();
+  // Count unescaped quotes to detect an unclosed string.
+  let unescapedQuotes = 0;
+  let escape = false;
+  for (const ch of content) {
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') unescapedQuotes++;
+  }
+  // If we're inside a string, close it.
+  if (unescapedQuotes % 2 !== 0) content += '"';
+  // Build a stack of unclosed brackets/braces.
+  const stack: Array<"{" | "["> = [];
+  let inString = false;
+  escape = false;
+  for (const ch of content) {
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") {
+      stack.push(ch);
+    } else if (ch === "}" || ch === "]") {
+      stack.pop();
+    }
+  }
+  // Close in reverse order (LIFO).
+  while (stack.length > 0) {
+    const open = stack.pop();
+    content += open === "{" ? "}" : "]";
+  }
+  return content;
+}
+
+/** Try multiple strategies to parse the model's JSON output. */
+function safeJsonParse(content: string): unknown {
+  const strategies = [
+    () => JSON.parse(content),
+    () => JSON.parse(extractJson(content)),
+    () => JSON.parse(removeTrailingCommas(content)),
+    () => JSON.parse(removeTrailingCommas(extractJson(content))),
+    () => JSON.parse(completeJson(content)),
+    () => JSON.parse(completeJson(extractJson(content))),
+  ];
+  for (const fn of strategies) {
+    try {
+      return fn();
+    } catch {
+      // fall through to next strategy
+    }
+  }
+  throw new Error(`Unable to parse model JSON after ${strategies.length} attempts`);
+}
+
 /** Chat + strict JSON validation against a zod schema. One corrective retry:
  *  if the model returns malformed JSON, the error is fed back and it tries again. */
 export async function chatJson<S extends z.ZodTypeAny>(
@@ -96,7 +224,7 @@ export async function chatJson<S extends z.ZodTypeAny>(
 ): Promise<{ data: z.output<S>; usage: Usage }> {
   let total: Usage = { promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 };
   const thread = [...messages];
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     const { content, usage } = await chat(apiKey, thread);
     total = {
       promptTokens: total.promptTokens + usage.promptTokens,
@@ -105,9 +233,14 @@ export async function chatJson<S extends z.ZodTypeAny>(
       cacheMissTokens: total.cacheMissTokens + usage.cacheMissTokens,
     };
     try {
-      return { data: schema.parse(JSON.parse(content)), usage: total };
+      return { data: schema.parse(safeJsonParse(content)), usage: total };
     } catch (err) {
-      if (attempt === 1) throw err;
+      if (attempt === 2) {
+        const debugPath = ".loom-debug-content.json";
+        await writeFile(debugPath, content, "utf8");
+        console.error(`[debug] raw content written to ${debugPath}`);
+        throw err;
+      }
       thread.push(
         { role: "assistant", content },
         {
@@ -296,4 +429,87 @@ export async function summarizeSession(
     SummarySchema,
   );
   return { summary: data.summary, usage };
+}
+
+const PreviouslySnapshotSchema = z.object({
+  identity: z.array(z.string().min(1)).max(6),
+  patterns: z.array(z.string().min(1)).max(6),
+  strategies: z.array(z.string().min(1)).max(4),
+  context: z.array(z.string().min(1)).max(4),
+});
+
+/** Generate a Previously-style memory snapshot as of the start of `sessionStart`.
+ *  Uses the rolling summary of prior sessions so each slice has a realistic
+ *  memory state without re-reading every prior turn. */
+export async function generatePreviouslySnapshot(
+  apiKey: string,
+  persona: Persona,
+  timeZone: string,
+  sessionStart: Date,
+  sliceId: string,
+  marking: Marking,
+  rollingSummary?: string,
+): Promise<{ content: string; usage: Usage }> {
+  const system = [
+    "You are the memory system of a personal AI assistant. At the start of a new session, produce a memory snapshot.",
+    "Output STRICT JSON only: {\"identity\": [...], \"patterns\": [...], \"strategies\": [...], \"context\": [...]}",
+    "- identity: who the user is, what they value, their key relationships and goals (3-6 bullets).",
+    "- patterns: recurring behaviors, preferences, communication style (3-6 bullets).",
+    "- strategies: how the assistant should interact with this user (2-4 bullets).",
+    "- context: what's top of mind right now, open loops, recent emotional state (2-4 bullets).",
+    "Be concrete and grounded in the provided summary. Avoid generic platitudes.",
+  ].join("\n");
+  const user = [
+    `User persona: ${persona.name} — ${persona.summary}`,
+    `Session date: ${formatHumanDate(sessionStart, timeZone)}, ${formatHumanTime(sessionStart, timeZone)}.`,
+    `Current session focus: ${marking.focus}`,
+    `Current session summary: ${marking.summary}`,
+    `Current open loops: ${marking.open_loops.join(", ") || "none"}`,
+    `Current emotional tone: ${marking.emotional_tone}`,
+    "",
+    rollingSummary
+      ? `Running summary of prior sessions:\n${rollingSummary}`
+      : "This is the first session; no prior memory exists yet.",
+  ].join("\n");
+
+  const { data, usage } = await chatJson(
+    apiKey,
+    [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    PreviouslySnapshotSchema,
+  );
+
+  const bullets = (items: string[]) =>
+    items.length > 0 ? items.map((s) => `- ${s}`).join("\n") : "_No entries yet._";
+
+  const content = [
+    "# Previously On",
+    "",
+    `_Active slice: ${sliceId} | Updated: ${formatHumanDate(sessionStart, timeZone)}_`,
+    "",
+    "## 长期记忆",
+    "",
+    "### User identity",
+    "",
+    bullets(data.identity),
+    "",
+    "### User patterns",
+    "",
+    bullets(data.patterns),
+    "",
+    "### Agent strategies",
+    "",
+    bullets(data.strategies),
+    "",
+    "## 短期记忆",
+    "",
+    "### Current context",
+    "",
+    bullets(data.context),
+    "",
+  ].join("\n");
+
+  return { content, usage };
 }

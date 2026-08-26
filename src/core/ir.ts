@@ -64,4 +64,6 @@ export interface Slice {
   events: DatedEvent[];
   turns: DatedTurn[];
   marking?: Marking;
+  /** Snapshot of long- and short-term memory as of the start of this slice. */
+  previously?: string;
 }
