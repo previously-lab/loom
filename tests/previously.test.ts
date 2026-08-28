@@ -4,12 +4,16 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { readFile as rf } from "node:fs/promises";
-import { StoryBibleSchema, type Slice } from "../src/core/ir.js";
+import { StoryBibleSchema, type StoryBible, type Slice } from "../src/core/ir.js";
 import {
   buildManifest,
   buildStrands,
   renderCoreMd,
+  renderDirectionMd,
+  renderMutationRecord,
+  renderMutationsMd,
   sliceDir,
+  writeEvolutionFiles,
   writePreviouslyDataset,
   writeSlice,
 } from "../src/writers/previously.js";
@@ -89,9 +93,16 @@ describe("previously writer", () => {
     const root = await mkdtemp(join(tmpdir(), "loom-"));
     dirs.push(root);
     const persona = { name: "Maya Chen", summary: "Indie developer in Hangzhou." };
+    const bible = {
+      persona,
+      startDate: "2025-03-15",
+      timezone: "Asia/Shanghai",
+      events: [],
+      mutations: [],
+    };
     const slices = [fakeSlice()];
 
-    await writePreviouslyDataset(root, persona, slices);
+    await writePreviouslyDataset(root, bible, slices);
 
     const profile = await readFile(join(root, "user", "profile.md"), "utf8");
     expect(profile).toContain("Maya Chen");
@@ -202,5 +213,111 @@ describe("previously writer", () => {
     expect(strands.tidepool).toEqual(["2025/03/15/2200", "2025/04/20/1700"]);
     expect(strands.beta).toEqual(["2025/03/15/2200"]);
     expect(strands.marathon).toEqual(["2025/04/20/1700"]);
+  });
+});
+
+describe("evolution layer (v1.0)", () => {
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true })));
+  });
+
+  function fakeBible(overrides?: Partial<StoryBible>): StoryBible {
+    return {
+      persona: { name: "Maya Chen", summary: "Indie developer." },
+      startDate: "2025-03-15",
+      timezone: "Asia/Shanghai",
+      events: [],
+      mutations: [],
+      ...overrides,
+    };
+  }
+
+  it("falls back to the kernel's minimal direction template when unseeded", async () => {
+    const root = await mkdtemp(join(tmpdir(), "loom-"));
+    dirs.push(root);
+    const written = await writeEvolutionFiles(root, fakeBible());
+
+    const direction = await readFile(join(root, "evolution", "direction.md"), "utf8");
+    expect(direction).toContain("# Direction");
+    expect(direction).toContain("# Anti-goals");
+    expect(direction).toContain("# Evidence");
+    expect(direction).toContain("# Log");
+    expect(direction).toContain("_(Not set yet");
+
+    const mutations = await readFile(join(root, "evolution", "mutations.md"), "utf8");
+    expect(mutations).toContain("# Mutations Archive");
+    expect(mutations).not.toContain("## ");
+
+    // No playbooks seeded → no agent-playbooks directory entries
+    expect(written.some((f) => f.includes("agent-playbooks"))).toBe(false);
+  });
+
+  it("renders a seeded direction with the four fixed sections", () => {
+    const md = renderDirectionMd({
+      direction: "Keep momentum on the user's own projects.",
+      antiGoals: "Never become a cheerleader.",
+      evidence: "- 20250315-1400",
+      log: "- 2025-03-15: seeded",
+    });
+    const sections = md.split("\n").filter((l) => l.startsWith("# "));
+    expect(sections).toEqual(["# Direction", "# Anti-goals", "# Evidence", "# Log"]);
+    expect(md).toContain("Keep momentum on the user's own projects.");
+    expect(md).toContain("Never become a cheerleader.");
+  });
+
+  it("renders mutation records byte-compatibly with the kernel", () => {
+    const block = renderMutationRecord({
+      ts: "2025-03-15T14:30:00Z",
+      target: "playbook:recall",
+      summary: "Read full slices before answering emotional topics.",
+      expectedBenefit: "Fewer shallow answers on emotional recalls.",
+      evidence: ["20250315-1400 turn 3"],
+    });
+    expect(block).toBe(
+      [
+        "## 2025-03-15T14:30:00Z — playbook:recall",
+        "",
+        "- **Summary:** Read full slices before answering emotional topics.",
+        "- **Expected benefit:** Fewer shallow answers on emotional recalls.",
+        "- **Evidence:**",
+        "  - 20250315-1400 turn 3",
+      ].join("\n"),
+    );
+
+    const empty = renderMutationRecord({
+      ts: "2025-03-15T14:30:00Z",
+      target: "card",
+      summary: "s",
+      expectedBenefit: "b",
+      evidence: [],
+    });
+    expect(empty).toContain("  - (none recorded)");
+
+    const archive = renderMutationsMd([
+      {
+        ts: "2025-03-15T14:30:00Z",
+        target: "direction",
+        summary: "s",
+        expectedBenefit: "b",
+        evidence: [],
+      },
+    ]);
+    expect(archive.startsWith("# Mutations Archive")).toBe(true);
+    // The kernel parses records line-wise as `## {ts} — {target}` (acceptance.ts)
+    expect(archive).toMatch(/^## .+ — direction$/m);
+  });
+
+  it("writes seeded playbooks only for provided agents", async () => {
+    const root = await mkdtemp(join(tmpdir(), "loom-"));
+    dirs.push(root);
+    await writeEvolutionFiles(
+      root,
+      fakeBible({ playbooks: { recall: "Read full slices on emotional topics." } }),
+    );
+    const recall = await readFile(join(root, "agent-playbooks", "recall.md"), "utf8");
+    expect(recall).toBe("Read full slices on emotional topics.");
+    await expect(
+      readFile(join(root, "agent-playbooks", "search.md"), "utf8"),
+    ).rejects.toThrow();
   });
 });

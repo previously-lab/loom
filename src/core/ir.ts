@@ -17,11 +17,48 @@ export const PersonaSchema = z.object({
 });
 export type Persona = z.infer<typeof PersonaSchema>;
 
+/** Seed content for the Previously v1.0 evolution data layer (optional).
+ *  Mirrors the kernel's `memory/evolution/` files; when absent, writers fall
+ *  back to the kernel's own minimal templates. */
+export const DirectionSchema = z.object({
+  direction: z.string().min(1),
+  antiGoals: z.string().min(1),
+  evidence: z.string().default(""),
+  log: z.string().default(""),
+});
+export type Direction = z.infer<typeof DirectionSchema>;
+
+/** Targets must match the kernel's MutationTarget union verbatim. */
+export const MutationSchema = z.object({
+  ts: z.string().min(1),
+  target: z.enum([
+    "direction",
+    "card",
+    "playbook:recall",
+    "playbook:search",
+    "playbook:thinkdeep",
+  ]),
+  summary: z.string().min(1),
+  expectedBenefit: z.string().min(1),
+  evidence: z.array(z.string()).default([]),
+});
+export type Mutation = z.infer<typeof MutationSchema>;
+
+export const PlaybooksSchema = z.object({
+  recall: z.string().optional(),
+  search: z.string().optional(),
+  thinkdeep: z.string().optional(),
+});
+export type Playbooks = z.infer<typeof PlaybooksSchema>;
+
 export const StoryBibleSchema = z.object({
   persona: PersonaSchema,
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   timezone: z.string().min(1),
   events: z.array(StoryEventSchema).min(1),
+  direction: DirectionSchema.optional(),
+  mutations: z.array(MutationSchema).default([]),
+  playbooks: PlaybooksSchema.optional(),
 });
 export type StoryBible = z.infer<typeof StoryBibleSchema>;
 

@@ -110,9 +110,17 @@ pnpm generate --story stories/example --all --format previously # out/slices/...
 
 Useful flags: `--turns N` (turns per session), `--gap-days N` and
 `--max-events N` (pacing), `--seed N` (deterministic scheduling),
-`--max-cost USD` (hard budget guard, aborts when exceeded).
+`--max-cost USD` (hard budget guard, aborts when exceeded),
+`--resume` (continue from `.loom-state.json` after an interruption),
+`--write-only` (replay the writers from saved state with zero model calls).
 
-Previously output lands at `out/slices/YYYY/MM/DD/HHMM/timeline/core.md`;
+Previously output mirrors the kernel's memory layout:
+`out/episodic/slices/YYYY/MM/DD/HHMM/timeline/core.md` plus `timeline.md`,
+`strands.json`, monthly `_index.json`, and `user/profile.md`. It also seeds
+the **v1.0 evolution layer** — `evolution/direction.md`,
+`evolution/mutations.md`, and optional `agent-playbooks/*.md` — from the
+optional `direction:` / `mutations:` / `playbooks:` keys in the story bible
+(falling back to the kernel's own minimal templates when absent).
 LoCoMo output is `out/locomo.json`, an array of samples in the
 `locomo10.json` shape (`conversation` with `Dn:m` dialog ids,
 `session_summary`, `event_summary`, `qa`).
@@ -154,7 +162,10 @@ pnpm exec tsc --noEmit
 - [ ] Replay mode for authentic assistant-side artifacts (tool traces, card
       evolution)
 - [ ] Static HTML review export for human auditing
-- [ ] Previously index aggregation (`timeline/index.json`, `strands.json`)
+- [x] Previously index aggregation (`timeline.md`, `strands.json`, monthly
+      `_index.json`)
+- [x] v1.0 evolution layer seeds (`evolution/direction.md`,
+      `evolution/mutations.md`, `agent-playbooks/`)
 - [ ] Additional providers
 
 ## Attribution

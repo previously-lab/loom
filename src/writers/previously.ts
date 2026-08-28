@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import type { Persona, Slice } from "../core/ir.js";
+import type { Direction, Mutation, Persona, Playbooks, Slice, StoryBible } from "../core/ir.js";
 import { localParts } from "../core/calendar.js";
 
 /** Directory layout mirroring Previously: episodic/slices/YYYY/MM/DD/HHMM.
@@ -135,6 +135,113 @@ export function renderTimelineMd(slices: Slice[]): string {
   return lines.join("\n");
 }
 
+// ─── v1.0 evolution data layer (kernel: memory/evolution/, agent-playbooks/) ─
+
+/** Byte-identical copy of the kernel's minimal direction.md template
+ *  (Aftrbrez src/lib/evolution/store.ts DIRECTION_TEMPLATE) — used when the
+ *  story bible does not seed its own direction. */
+const DIRECTION_TEMPLATE = `# Direction
+
+_(Not set yet — what "better for the user" means across slices gets written here.)_
+
+# Anti-goals
+
+_(Not set yet — the drift guardrails: what we must NOT evolve into.)_
+
+# Evidence
+
+_(Each direction conclusion links its supporting slice pointers here.)_
+
+# Log
+
+_(Append-only: when the direction changed, and on what evidence.)_
+`;
+
+/** Byte-identical copy of the kernel's mutations archive header
+ *  (Aftrbrez src/lib/evolution/store.ts MUTATIONS_HEADER). */
+const MUTATIONS_HEADER = `# Mutations Archive
+
+Append-only log of accepted evolution mutations (design v1.0 §2.7). No
+automatic rollback, no cooldown, no mutation budget — a mutation that proves
+ineffective is marked \`ineffective\` here later, never deleted.
+`;
+
+export function renderDirectionMd(direction?: Direction): string {
+  if (!direction) return DIRECTION_TEMPLATE;
+  return [
+    "# Direction",
+    "",
+    direction.direction.trim(),
+    "",
+    "# Anti-goals",
+    "",
+    direction.antiGoals.trim(),
+    "",
+    "# Evidence",
+    "",
+    direction.evidence.trim() ||
+      "_(Each direction conclusion links its supporting slice pointers here.)_",
+    "",
+    "# Log",
+    "",
+    direction.log.trim() ||
+      "_(Append-only: when the direction changed, and on what evidence.)_",
+    "",
+  ].join("\n");
+}
+
+/** Byte-compatible with the kernel's renderMutationRecord (store.ts). */
+export function renderMutationRecord(m: Mutation): string {
+  const evidence = m.evidence.length
+    ? m.evidence.map((e) => `  - ${e}`).join("\n")
+    : "  - (none recorded)";
+  return [
+    `## ${m.ts} — ${m.target}`,
+    "",
+    `- **Summary:** ${m.summary}`,
+    `- **Expected benefit:** ${m.expectedBenefit}`,
+    `- **Evidence:**`,
+    evidence,
+  ].join("\n");
+}
+
+export function renderMutationsMd(mutations: Mutation[]): string {
+  if (mutations.length === 0) return MUTATIONS_HEADER;
+  return `${MUTATIONS_HEADER}\n${mutations.map(renderMutationRecord).join("\n\n")}\n`;
+}
+
+/** Writes evolution/direction.md, evolution/mutations.md, and any seeded
+ *  agent-playbooks/. fitness.json is deliberately NOT written — the kernel
+ *  degrades a missing store to empty (readFitness). Returns written paths. */
+export async function writeEvolutionFiles(
+  root: string,
+  story: StoryBible,
+): Promise<string[]> {
+  const written: string[] = [];
+  const evolutionDir = join(root, "evolution");
+  await mkdir(evolutionDir, { recursive: true });
+  const directionFile = join(evolutionDir, "direction.md");
+  await writeFile(directionFile, renderDirectionMd(story.direction), "utf8");
+  written.push(directionFile);
+  const mutationsFile = join(evolutionDir, "mutations.md");
+  await writeFile(mutationsFile, renderMutationsMd(story.mutations), "utf8");
+  written.push(mutationsFile);
+
+  const playbooks: Playbooks | undefined = story.playbooks;
+  if (playbooks) {
+    const dir = join(root, "agent-playbooks");
+    await mkdir(dir, { recursive: true });
+    for (const agent of ["recall", "search", "thinkdeep"] as const) {
+      const content = playbooks[agent];
+      if (!content) continue;
+      const file = join(dir, `${agent}.md`);
+      await writeFile(file, content, "utf8");
+      written.push(file);
+    }
+  }
+  return written;
+}
+
 export interface MonthlyIndex {
   month: string;
   slices: {
@@ -197,7 +304,7 @@ interface TreeNode {
   [key: string]: TreeNode | string[] | undefined;
 }
 
-export function buildManifestTree(slices: Slice[]): TreeNode {
+export function buildManifestTree(slices: Slice[], playbookAgents: string[] = []): TreeNode {
   const sorted = [...slices].sort((a, b) => a.start.getTime() - b.start.getTime());
   const slicesTree: TreeNode = {};
 
@@ -229,7 +336,7 @@ export function buildManifestTree(slices: Slice[]): TreeNode {
     dNode[hhmm] = sNode;
   }
 
-  return {
+  const tree: TreeNode = {
     user: {
       _files: ["profile.md"],
     },
@@ -237,7 +344,16 @@ export function buildManifestTree(slices: Slice[]): TreeNode {
       _files: ["current-previously.md", "strands.json", "timeline.md"],
       slices: slicesTree,
     },
+    evolution: {
+      _files: ["direction.md", "mutations.md"],
+    },
   };
+  if (playbookAgents.length > 0) {
+    tree["agent-playbooks"] = {
+      _files: playbookAgents.map((a) => `${a}.md`),
+    };
+  }
+  return tree;
 }
 
 export interface Manifest {
@@ -253,7 +369,7 @@ export interface Manifest {
   }>;
 }
 
-export function buildManifest(persona: Persona, slices: Slice[]): Manifest {
+export function buildManifest(persona: Persona, slices: Slice[], playbooks?: Playbooks): Manifest {
   const sorted = [...slices].sort((a, b) => a.start.getTime() - b.start.getTime());
   const id = persona.name.toLowerCase().replace(/\s+/g, "-");
   const startMonth = sorted.length > 0 ? sliceMonth(sorted[0]) : "";
@@ -266,6 +382,9 @@ export function buildManifest(persona: Persona, slices: Slice[]): Manifest {
   const blurb = persona.summary.length > 200
     ? `${persona.summary.slice(0, 200)}…`
     : persona.summary;
+  const playbookAgents = playbooks
+    ? (["recall", "search", "thinkdeep"] as const).filter((a) => playbooks[a])
+    : [];
   return {
     version: 1,
     personas: {
@@ -276,7 +395,7 @@ export function buildManifest(persona: Persona, slices: Slice[]): Manifest {
         topics,
         sliceCount: slices.length,
         dateRange: [startMonth, endMonth],
-        tree: buildManifestTree(slices),
+        tree: buildManifestTree(slices, playbookAgents),
       },
     },
   };
@@ -303,9 +422,10 @@ export async function writeSlice(root: string, slice: Slice): Promise<string> {
 
 export async function writePreviouslyDataset(
   root: string,
-  persona: Persona,
+  story: StoryBible,
   slices: Slice[],
 ): Promise<string> {
+  const persona = story.persona;
   const sorted = [...slices].sort((a, b) => a.start.getTime() - b.start.getTime());
   if (sorted.length === 0) {
     throw new Error("Cannot write Previously dataset with no slices");
@@ -347,6 +467,9 @@ export async function writePreviouslyDataset(
     await writeFile(join(timelineDir, "core.md"), renderCoreMd(slice), "utf8");
     await writeFile(join(timelineDir, "agent.md"), renderAgentMd(), "utf8");
   }
+
+  // v1.0 evolution data layer: evolution/ + agent-playbooks/
+  await writeEvolutionFiles(root, story);
 
   return episodicDir;
 }

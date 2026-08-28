@@ -116,12 +116,15 @@ async function main() {
   const runAll = has("all");
   const singleIndex = has("slice") ? Number(arg("slice")) : null;
   const resume = has("resume");
-  if (!runAll && singleIndex === null) {
+  // --write-only: replay the writers from .loom-state.json with ZERO model
+  // calls (e.g. to pick up new writer outputs like the evolution layer).
+  const writeOnly = has("write-only");
+  if (!writeOnly && !runAll && singleIndex === null) {
     throw new Error("Pass --all to generate every session, or --slice N for a single one");
   }
 
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) throw new Error("DEEPSEEK_API_KEY is not set");
+  const apiKey = process.env.DEEPSEEK_API_KEY ?? "";
+  if (!apiKey && !writeOnly) throw new Error("DEEPSEEK_API_KEY is not set");
 
   const bible = StoryBibleSchema.parse(
     parse(await readFile(join(storyDir, "story.yaml"), "utf8")),
@@ -131,7 +134,7 @@ async function main() {
   const dated = assignEventDates(bible.events, bible.startDate, tz);
   const sessions = groupEventsIntoSessions(bible.events, gapDays, maxEvents);
 
-  const indices = runAll ? sessions.map((_, i) => i) : [singleIndex!];
+  const indices = writeOnly ? [] : runAll ? sessions.map((_, i) => i) : [singleIndex!];
   if (singleIndex !== null && singleIndex >= sessions.length) {
     throw new Error(`Only ${sessions.length} session(s), asked for #${singleIndex}`);
   }
@@ -146,7 +149,19 @@ async function main() {
   let spent = 0;
   let lastIndex = -1;
 
-  if (resume) {
+  if (writeOnly) {
+    const state = await loadState(outDir);
+    if (!state || state.slices.length === 0) {
+      throw new Error("--write-only requires a non-empty .loom-state.json in --out");
+    }
+    lastIndex = state.lastIndex;
+    rollingSummary = state.rollingSummary;
+    spent = state.spent;
+    for (const p of state.slices) {
+      slices.push(deserializeSlice(p));
+    }
+    console.log(`[write-only] replaying writers from state: ${slices.length} slice(s), previously spent ~$${spent.toFixed(4)}`);
+  } else if (resume) {
     const state = await loadState(outDir);
     if (state) {
       lastIndex = state.lastIndex;
@@ -236,7 +251,7 @@ async function main() {
   }
 
   // Only the LAST slice gets a rich Previously snapshot; it is what the app reads.
-  if ((format === "previously" || format === "both") && slices.length > 0) {
+  if (!writeOnly && (format === "previously" || format === "both") && slices.length > 0) {
     const last = slices[slices.length - 1];
     if (last.marking) {
       const snap = await generatePreviouslySnapshot(
@@ -251,15 +266,23 @@ async function main() {
       track(snap.usage, "prev-final");
       last.previously = snap.content;
       await writeSliceFiles(outDir, last);
+      // Re-persist state so a later --resume/--write-only replay reproduces
+      // the snapshot instead of the empty template.
+      await saveState(outDir, {
+        lastIndex,
+        rollingSummary,
+        spent,
+        slices: slices.map(serializeSlice),
+      });
       console.log(`[write] previously snapshot: ${last.sliceId}`);
     }
   }
 
   if ((format === "previously" || format === "both") && slices.length > 0) {
-    const dir = await writePreviouslyDataset(outDir, bible.persona, slices);
+    const dir = await writePreviouslyDataset(outDir, bible, slices);
     console.log(`[write] previously: ${dir}`);
 
-    const manifest = buildManifest(bible.persona, slices);
+    const manifest = buildManifest(bible.persona, slices, bible.playbooks);
     const manifestFile = join(outDir, "..", "manifest.json");
     await writeFile(manifestFile, JSON.stringify(manifest, null, 2), "utf8");
     console.log(`[write] manifest: ${manifestFile}`);
@@ -275,7 +298,7 @@ async function main() {
       summaries,
       qa,
     );
-    if (qaCount > 0) {
+    if (!writeOnly && qaCount > 0) {
       const turns = slices.flatMap((s, i) =>
         s.turns.map((t, j) => ({
           diaId: `D${i + 1}:${j + 1}`,
