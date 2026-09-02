@@ -18,31 +18,42 @@ export const PersonaSchema = z.object({
 export type Persona = z.infer<typeof PersonaSchema>;
 
 /** Seed content for the Previously v1.0 evolution data layer (optional).
- *  Mirrors the kernel's `memory/evolution/` files; when absent, writers fall
- *  back to the kernel's own minimal templates. */
+ *  Mirrors the kernel's `memory/evolution/direction.md` skeleton: a USER
+ *  PORTRAIT over six fixed dimensions plus a bounded pool of falsifiable
+ *  hypotheses. When absent, writers fall back to the kernel's own minimal
+ *  template. */
+export const PORTRAIT_SECTIONS = [
+  "Traits & cognitive style",
+  "Triggers & rhythms",
+  "Patterns & loops",
+  "Strengths & resilience",
+  "Communication preferences",
+  "Values & boundaries",
+] as const;
+
+export const PortraitEntrySchema = z.object({
+  section: z.enum(PORTRAIT_SECTIONS),
+  /** Descriptive, portrait-grade text — never imperatives. Slice pointers
+   *  ride the trailing "— refs:" tail only, never the body. */
+  text: z.string().min(1),
+  refs: z.array(z.string()).default([]),
+});
+export type PortraitEntry = z.infer<typeof PortraitEntrySchema>;
+
+/** A trait-level guess, mirroring the kernel's hypothesis line format:
+ *  `- [proposed YYYY-MM-DD-HHMM] <guess> — falsify if: <condition>`. */
+export const HypothesisSchema = z.object({
+  proposed: z.string().regex(/^\d{4}-\d{2}-\d{2}-\d{4}$/),
+  guess: z.string().min(1),
+  falsifyIf: z.string().min(1),
+});
+export type Hypothesis = z.infer<typeof HypothesisSchema>;
+
 export const DirectionSchema = z.object({
-  direction: z.string().min(1),
-  antiGoals: z.string().min(1),
-  evidence: z.string().default(""),
-  log: z.string().default(""),
+  portrait: z.array(PortraitEntrySchema).default([]),
+  hypotheses: z.array(HypothesisSchema).max(10).default([]),
 });
 export type Direction = z.infer<typeof DirectionSchema>;
-
-/** Targets must match the kernel's MutationTarget union verbatim. */
-export const MutationSchema = z.object({
-  ts: z.string().min(1),
-  target: z.enum([
-    "direction",
-    "card",
-    "playbook:recall",
-    "playbook:search",
-    "playbook:thinkdeep",
-  ]),
-  summary: z.string().min(1),
-  expectedBenefit: z.string().min(1),
-  evidence: z.array(z.string()).default([]),
-});
-export type Mutation = z.infer<typeof MutationSchema>;
 
 export const PlaybooksSchema = z.object({
   recall: z.string().optional(),
@@ -57,7 +68,6 @@ export const StoryBibleSchema = z.object({
   timezone: z.string().min(1),
   events: z.array(StoryEventSchema).min(1),
   direction: DirectionSchema.optional(),
-  mutations: z.array(MutationSchema).default([]),
   playbooks: PlaybooksSchema.optional(),
 });
 export type StoryBible = z.infer<typeof StoryBibleSchema>;

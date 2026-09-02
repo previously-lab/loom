@@ -10,8 +10,6 @@ import {
   buildStrands,
   renderCoreMd,
   renderDirectionMd,
-  renderMutationRecord,
-  renderMutationsMd,
   sliceDir,
   writeEvolutionFiles,
   writePreviouslyDataset,
@@ -98,7 +96,6 @@ describe("previously writer", () => {
       startDate: "2025-03-15",
       timezone: "Asia/Shanghai",
       events: [],
-      mutations: [],
     };
     const slices = [fakeSlice()];
 
@@ -112,6 +109,8 @@ describe("previously writer", () => {
     const current = await readFile(join(root, "episodic", "current-previously.md"), "utf8");
     expect(current).toContain("# Previously On");
     expect(current).toContain("Maya Chen");
+    expect(current).toContain("Format: user card v2");
+    expect(current).not.toContain("## Self-model");
 
     const timeline = await readFile(join(root, "episodic", "timeline.md"), "utf8");
     expect(timeline).toContain("# Timeline");
@@ -227,7 +226,6 @@ describe("evolution layer (v1.0)", () => {
       startDate: "2025-03-15",
       timezone: "Asia/Shanghai",
       events: [],
-      mutations: [],
       ...overrides,
     };
   }
@@ -238,73 +236,51 @@ describe("evolution layer (v1.0)", () => {
     const written = await writeEvolutionFiles(root, fakeBible());
 
     const direction = await readFile(join(root, "evolution", "direction.md"), "utf8");
-    expect(direction).toContain("# Direction");
-    expect(direction).toContain("# Anti-goals");
-    expect(direction).toContain("# Evidence");
-    expect(direction).toContain("# Log");
+    expect(direction).toContain("# Portrait");
+    expect(direction).toContain("## Traits & cognitive style");
+    expect(direction).toContain("## Triggers & rhythms");
+    expect(direction).toContain("## Patterns & loops");
+    expect(direction).toContain("## Strengths & resilience");
+    expect(direction).toContain("## Communication preferences");
+    expect(direction).toContain("## Values & boundaries");
+    expect(direction).toContain("# Hypotheses");
     expect(direction).toContain("_(Not set yet");
 
-    const mutations = await readFile(join(root, "evolution", "mutations.md"), "utf8");
-    expect(mutations).toContain("# Mutations Archive");
-    expect(mutations).not.toContain("## ");
+    // The kernel dropped the mutations archive — loom must not generate it
+    await expect(
+      readFile(join(root, "evolution", "mutations.md"), "utf8"),
+    ).rejects.toThrow();
 
     // No playbooks seeded → no agent-playbooks directory entries
     expect(written.some((f) => f.includes("agent-playbooks"))).toBe(false);
   });
 
-  it("renders a seeded direction with the four fixed sections", () => {
+  it("renders a seeded direction with the portrait + hypotheses skeleton", () => {
     const md = renderDirectionMd({
-      direction: "Keep momentum on the user's own projects.",
-      antiGoals: "Never become a cheerleader.",
-      evidence: "- 20250315-1400",
-      log: "- 2025-03-15: seeded",
+      portrait: [
+        {
+          section: "Traits & cognitive style",
+          text: "Builds structure before acting under uncertainty.",
+          refs: ["2025-03-15-1400", "2025-03-20-0900"],
+        },
+      ],
+      hypotheses: [
+        {
+          proposed: "2025-03-15-1400",
+          guess: "Prefers concrete next steps over open-ended advice",
+          falsifyIf: "She asks for exploration without an action plan",
+        },
+      ],
     });
     const sections = md.split("\n").filter((l) => l.startsWith("# "));
-    expect(sections).toEqual(["# Direction", "# Anti-goals", "# Evidence", "# Log"]);
-    expect(md).toContain("Keep momentum on the user's own projects.");
-    expect(md).toContain("Never become a cheerleader.");
-  });
-
-  it("renders mutation records byte-compatibly with the kernel", () => {
-    const block = renderMutationRecord({
-      ts: "2025-03-15T14:30:00Z",
-      target: "playbook:recall",
-      summary: "Read full slices before answering emotional topics.",
-      expectedBenefit: "Fewer shallow answers on emotional recalls.",
-      evidence: ["20250315-1400 turn 3"],
-    });
-    expect(block).toBe(
-      [
-        "## 2025-03-15T14:30:00Z — playbook:recall",
-        "",
-        "- **Summary:** Read full slices before answering emotional topics.",
-        "- **Expected benefit:** Fewer shallow answers on emotional recalls.",
-        "- **Evidence:**",
-        "  - 20250315-1400 turn 3",
-      ].join("\n"),
+    expect(sections).toEqual(["# Portrait", "# Hypotheses"]);
+    expect(md).toContain(
+      "- Builds structure before acting under uncertainty. — refs: 2025-03-15-1400, 2025-03-20-0900",
     );
-
-    const empty = renderMutationRecord({
-      ts: "2025-03-15T14:30:00Z",
-      target: "card",
-      summary: "s",
-      expectedBenefit: "b",
-      evidence: [],
-    });
-    expect(empty).toContain("  - (none recorded)");
-
-    const archive = renderMutationsMd([
-      {
-        ts: "2025-03-15T14:30:00Z",
-        target: "direction",
-        summary: "s",
-        expectedBenefit: "b",
-        evidence: [],
-      },
-    ]);
-    expect(archive.startsWith("# Mutations Archive")).toBe(true);
-    // The kernel parses records line-wise as `## {ts} — {target}` (acceptance.ts)
-    expect(archive).toMatch(/^## .+ — direction$/m);
+    // Hypothesis lines follow the kernel's fixed per-line format
+    expect(md).toContain(
+      "- [proposed 2025-03-15-1400] Prefers concrete next steps over open-ended advice — falsify if: She asks for exploration without an action plan",
+    );
   });
 
   it("writes seeded playbooks only for provided agents", async () => {

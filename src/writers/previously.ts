@@ -1,7 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import type { Direction, Mutation, Persona, Playbooks, Slice, StoryBible } from "../core/ir.js";
+import type { Direction, Persona, Playbooks, Slice, StoryBible } from "../core/ir.js";
+import { PORTRAIT_SECTIONS } from "../core/ir.js";
 import { localParts } from "../core/calendar.js";
 
 /** Directory layout mirroring Previously: episodic/slices/YYYY/MM/DD/HHMM.
@@ -94,7 +95,7 @@ export function renderCurrentPreviously(persona: Persona, slices: Slice[]): stri
     return last.previously;
   }
   const updated = last ? new Date().toISOString() : new Date().toISOString();
-  return `# Previously On\n\n_Active slice: ${last?.sliceId ?? "none"} | Format: user card v2 | Updated: ${updated}_\n\n## Identity\n\n- Name: ${persona.name}\n- Address them as: ${addressAs(persona.name)}\n- Locale: en\n- Timezone: ${last?.timezone ?? "UTC"}\n\n## Past\n\n${persona.summary}\n\n## Now\n\n_No active hooks._\n\n## Horizon\n\n_No open commitments._\n\n## Self-model\n\n- Treat this as read-only seed data; evolve only from real conversation turns.\n`;
+  return `# Previously On\n\n_Active slice: ${last?.sliceId ?? "none"} | Format: user card v2 | Updated: ${updated}_\n\n## Identity\n\n- Name: ${persona.name}\n- Address them as: ${addressAs(persona.name)}\n- Locale: en\n- Timezone: ${last?.timezone ?? "UTC"}\n\n## Past\n\n${persona.summary}\n\n## Now\n\n_No active hooks._\n\n## Horizon\n\n_No open commitments._\n`;
 }
 
 export function renderTimelineMd(slices: Slice[]): string {
@@ -140,79 +141,49 @@ export function renderTimelineMd(slices: Slice[]): string {
 /** Byte-identical copy of the kernel's minimal direction.md template
  *  (Aftrbrez src/lib/evolution/store.ts DIRECTION_TEMPLATE) — used when the
  *  story bible does not seed its own direction. */
-const DIRECTION_TEMPLATE = `# Direction
+const DIRECTION_TEMPLATE = `# Portrait
 
-_(Not set yet — what "better for the user" means across slices gets written here.)_
+_(Not set yet — confirmed, cross-slice understanding of WHO the user is: descriptive, portrait-grade (holds across contexts, outlives its evidence, predicts), never imperatives. Slice pointers ride trailing "— refs:" tails only.)_
 
-# Anti-goals
+## Traits & cognitive style
 
-_(Not set yet — the drift guardrails: what we must NOT evolve into.)_
+## Triggers & rhythms
 
-# Evidence
+## Patterns & loops
 
-_(Each direction conclusion links its supporting slice pointers here.)_
+## Strengths & resilience
 
-# Log
+## Communication preferences
 
-_(Append-only: when the direction changed, and on what evidence.)_
-`;
+## Values & boundaries
 
-/** Byte-identical copy of the kernel's mutations archive header
- *  (Aftrbrez src/lib/evolution/store.ts MUTATIONS_HEADER). */
-const MUTATIONS_HEADER = `# Mutations Archive
+# Hypotheses
 
-Append-only log of accepted evolution mutations (design v1.0 §2.7). No
-automatic rollback, no cooldown, no mutation budget — a mutation that proves
-ineffective is marked \`ineffective\` here later, never deleted.
+_(Not set yet — bounded dynamic pool of trait-level guesses (≤10), each "- [proposed YYYY-MM-DD-HHMM] <guess> — falsify if: <condition>". Confirmed → promoted into the Portrait in the same run; refuted → removed; unverified 4 slices → retired. Refilled toward 10 each run.)_
 `;
 
 export function renderDirectionMd(direction?: Direction): string {
   if (!direction) return DIRECTION_TEMPLATE;
-  return [
-    "# Direction",
-    "",
-    direction.direction.trim(),
-    "",
-    "# Anti-goals",
-    "",
-    direction.antiGoals.trim(),
-    "",
-    "# Evidence",
-    "",
-    direction.evidence.trim() ||
-      "_(Each direction conclusion links its supporting slice pointers here.)_",
-    "",
-    "# Log",
-    "",
-    direction.log.trim() ||
-      "_(Append-only: when the direction changed, and on what evidence.)_",
-    "",
-  ].join("\n");
+  const lines: string[] = ["# Portrait", ""];
+  for (const section of PORTRAIT_SECTIONS) {
+    lines.push(`## ${section}`, "");
+    for (const entry of direction.portrait.filter((e) => e.section === section)) {
+      const refs = entry.refs.length ? ` — refs: ${entry.refs.join(", ")}` : "";
+      lines.push(`- ${entry.text}${refs}`);
+    }
+    lines.push("");
+  }
+  lines.push("# Hypotheses", "");
+  for (const h of direction.hypotheses) {
+    lines.push(`- [proposed ${h.proposed}] ${h.guess} — falsify if: ${h.falsifyIf}`);
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
-/** Byte-compatible with the kernel's renderMutationRecord (store.ts). */
-export function renderMutationRecord(m: Mutation): string {
-  const evidence = m.evidence.length
-    ? m.evidence.map((e) => `  - ${e}`).join("\n")
-    : "  - (none recorded)";
-  return [
-    `## ${m.ts} — ${m.target}`,
-    "",
-    `- **Summary:** ${m.summary}`,
-    `- **Expected benefit:** ${m.expectedBenefit}`,
-    `- **Evidence:**`,
-    evidence,
-  ].join("\n");
-}
-
-export function renderMutationsMd(mutations: Mutation[]): string {
-  if (mutations.length === 0) return MUTATIONS_HEADER;
-  return `${MUTATIONS_HEADER}\n${mutations.map(renderMutationRecord).join("\n\n")}\n`;
-}
-
-/** Writes evolution/direction.md, evolution/mutations.md, and any seeded
- *  agent-playbooks/. fitness.json is deliberately NOT written — the kernel
- *  degrades a missing store to empty (readFitness). Returns written paths. */
+/** Writes evolution/direction.md and any seeded agent-playbooks/.
+ *  fitness.json is deliberately NOT written — the kernel degrades a missing
+ *  store to empty (readFitness). Returns written paths. */
 export async function writeEvolutionFiles(
   root: string,
   story: StoryBible,
@@ -223,9 +194,6 @@ export async function writeEvolutionFiles(
   const directionFile = join(evolutionDir, "direction.md");
   await writeFile(directionFile, renderDirectionMd(story.direction), "utf8");
   written.push(directionFile);
-  const mutationsFile = join(evolutionDir, "mutations.md");
-  await writeFile(mutationsFile, renderMutationsMd(story.mutations), "utf8");
-  written.push(mutationsFile);
 
   const playbooks: Playbooks | undefined = story.playbooks;
   if (playbooks) {
@@ -345,7 +313,7 @@ export function buildManifestTree(slices: Slice[], playbookAgents: string[] = []
       slices: slicesTree,
     },
     evolution: {
-      _files: ["direction.md", "mutations.md"],
+      _files: ["direction.md"],
     },
   };
   if (playbookAgents.length > 0) {

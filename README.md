@@ -117,9 +117,9 @@ Useful flags: `--turns N` (turns per session), `--gap-days N` and
 Previously output mirrors the kernel's memory layout:
 `out/episodic/slices/YYYY/MM/DD/HHMM/timeline/core.md` plus `timeline.md`,
 `strands.json`, monthly `_index.json`, and `user/profile.md`. It also seeds
-the **v1.0 evolution layer** — `evolution/direction.md`,
-`evolution/mutations.md`, and optional `agent-playbooks/*.md` — from the
-optional `direction:` / `mutations:` / `playbooks:` keys in the story bible
+the **v1.0 evolution layer** — `evolution/direction.md` (user portrait +
+hypothesis pool) and optional `agent-playbooks/*.md` — from the
+optional `direction:` / `playbooks:` keys in the story bible
 (falling back to the kernel's own minimal templates when absent).
 LoCoMo output is `out/locomo.json`, an array of samples in the
 `locomo10.json` shape (`conversation` with `Dn:m` dialog ids,
@@ -165,7 +165,7 @@ pnpm exec tsc --noEmit
 - [x] Previously index aggregation (`timeline.md`, `strands.json`, monthly
       `_index.json`)
 - [x] v1.0 evolution layer seeds (`evolution/direction.md`,
-      `evolution/mutations.md`, `agent-playbooks/`)
+      `agent-playbooks/`)
 - [ ] Additional providers
 
 ## Attribution
